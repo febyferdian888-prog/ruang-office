@@ -92,7 +92,7 @@ async function sessionRowsFor(agents: ProjectAgent[], now: number): Promise<Sess
       workspace: summary.cwd ?? summary.agentSlug,
       lastActive: relative(now - summary.lastActive),
       lastActiveMs: summary.lastActive,
-      src: 'cli',
+      src: summary.source,
       id: summary.id,
     }))
 }
@@ -118,13 +118,24 @@ function insightsOutput(totals: Awaited<ReturnType<typeof collectUsageTotals>>, 
     `  Output tokens: ${totals.outputTokens}`,
     `  Total tokens:  ${totals.inputTokens + totals.outputTokens}`,
   ]
+  // Ruang's own parser (mission-control.ts's parseInsights) reads each section's data rows
+  // starting 3 lines after its title: title, a separator rule, the header row, then data — the
+  // separator line is not decorative, skipping it shifts every row off by one.
+  const separator = `  ${'─'.repeat(56)}`
   if (totals.models.size > 0) {
-    lines.push('', '◆ Models Used', `  ${pad('Model', 24)}${pad('Sessions', 10)}Tokens`)
+    lines.push('', '◆ Models Used', separator, `  ${pad('Model', 24)}${pad('Sessions', 10)}Tokens`)
     for (const [model, row] of [...totals.models].sort((a, b) => b[1].tokens - a[1].tokens)) lines.push(`  ${pad(model, 24)}${pad(String(row.sessions), 10)}${row.tokens}`)
+  }
+  // Only shown when a session carried a `<channel source="plugin:...">` tag (e.g. Claude Code's
+  // Telegram plugin) — Ruang's own parser only expects this section when there is more than
+  // plain CLI use.
+  if (totals.sources.size > 1 || (totals.sources.size === 1 && !totals.sources.has('cli'))) {
+    lines.push('', '◆ Platforms', separator, `  ${pad('Source', 16)}${pad('Sessions', 10)}${pad('Messages', 10)}Tokens`)
+    for (const [source, row] of [...totals.sources].sort((a, b) => b[1].tokens - a[1].tokens)) lines.push(`  ${pad(source, 16)}${pad(String(row.sessions), 10)}${pad(String(row.messages), 10)}${row.tokens}`)
   }
   if (totals.tools.size > 0) {
     const totalCalls = Math.max(1, totals.toolCalls)
-    lines.push('', '◆ Top Tools', `  ${pad('Tool', 24)}${pad('Calls', 10)}Share`)
+    lines.push('', '◆ Top Tools', separator, `  ${pad('Tool', 24)}${pad('Calls', 10)}Share`)
     for (const [tool, calls] of [...totals.tools].sort((a, b) => b[1] - a[1])) lines.push(`  ${pad(tool, 24)}${pad(String(calls), 10)}${((calls / totalCalls) * 100).toFixed(1)}%`)
   }
   return lines.join('\n')

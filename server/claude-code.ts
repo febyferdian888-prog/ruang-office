@@ -131,7 +131,12 @@ export interface SessionSummary {
   cwd?: string
   lastActive: number
   messageCount: number
+  /** The channel this session is running on, when a message carries a `<channel source="...">` tag (e.g. Claude Code's Telegram plugin); 'cli' otherwise. */
+  source: string
 }
+
+/** A `<channel source="plugin:telegram:telegram" ...>` tag, as Claude Code's channel plugins tag inbound messages. */
+const CHANNEL_SOURCE = /<channel\s+source="plugin:([a-z0-9_-]+)[:"]/i
 
 /** Reads just enough of a session (first user turn + tail) to summarise it for lists. */
 export async function summariseSession(file: string): Promise<SessionSummary | undefined> {
@@ -140,6 +145,7 @@ export async function summariseSession(file: string): Promise<SessionSummary | u
   let preview = ''
   let cwd: string | undefined
   let messageCount = 0
+  let source = 'cli'
   let lastActive = await safeMtime(file)
   for await (const entry of readTranscript(file)) {
     if (entry.cwd) cwd = entry.cwd
@@ -149,17 +155,18 @@ export async function summariseSession(file: string): Promise<SessionSummary | u
     const content = entry.message?.content
     const text = typeof content === 'string' ? content : contentBlocks(content).find((block) => block.type === 'text')?.text
     if (!text) continue
+    if (source === 'cli') { const channel = text.match(CHANNEL_SOURCE)?.[1]; if (channel) source = channel }
     if (entry.type === 'user' && !title) title = text.trim().slice(0, 120)
     preview = text.trim().slice(0, 200)
   }
   if (messageCount === 0) return undefined
-  return { id, file, title: title || preview || 'Untitled session', preview, cwd, lastActive, messageCount }
+  return { id, file, title: title || preview || 'Untitled session', preview, cwd, lastActive, messageCount, source }
 }
 
-export interface UsageTotals { sessions: number; messages: number; toolCalls: number; inputTokens: number; outputTokens: number; models: Map<string, { sessions: number; tokens: number }>; tools: Map<string, number> }
+export interface UsageTotals { sessions: number; messages: number; toolCalls: number; inputTokens: number; outputTokens: number; models: Map<string, { sessions: number; tokens: number }>; tools: Map<string, number>; sources: Map<string, { sessions: number; messages: number; tokens: number }> }
 
 function emptyUsage(): UsageTotals {
-  return { sessions: 0, messages: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, models: new Map(), tools: new Map() }
+  return { sessions: 0, messages: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, models: new Map(), tools: new Map(), sources: new Map() }
 }
 
 /** Sums tokens, messages and tool calls across a set of session files within a time window. */
@@ -169,6 +176,9 @@ export async function collectUsageTotals(files: readonly string[], sinceMs: numb
     const mtime = await safeMtime(file)
     if (mtime < sinceMs) continue
     let touchedThisSession = false
+    let sessionSource = 'cli'
+    let sessionMessages = 0
+    let sessionTokens = 0
     const sessionModels = new Set<string>()
     for await (const entry of readTranscript(file)) {
       const ts = entry.timestamp ? Date.parse(entry.timestamp) : NaN
@@ -176,6 +186,13 @@ export async function collectUsageTotals(files: readonly string[], sinceMs: numb
       if (entry.type !== 'user' && entry.type !== 'assistant') continue
       touchedThisSession = true
       totals.messages += 1
+      sessionMessages += 1
+      if (sessionSource === 'cli') {
+        const content = entry.message?.content
+        const text = typeof content === 'string' ? content : contentBlocks(content).find((block) => block.type === 'text')?.text
+        const channel = text?.match(CHANNEL_SOURCE)?.[1]
+        if (channel) sessionSource = channel
+      }
       if (entry.type === 'assistant') {
         const model = entry.message?.model
         if (model) sessionModels.add(model)
@@ -183,11 +200,14 @@ export async function collectUsageTotals(files: readonly string[], sinceMs: numb
         if (usage) {
           const input = Number(usage.input_tokens ?? 0) + Number(usage.cache_creation_input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0)
           const output = Number(usage.output_tokens ?? 0)
-          totals.inputTokens += Number.isFinite(input) ? input : 0
-          totals.outputTokens += Number.isFinite(output) ? output : 0
+          const inputTokens = Number.isFinite(input) ? input : 0
+          const outputTokens = Number.isFinite(output) ? output : 0
+          totals.inputTokens += inputTokens
+          totals.outputTokens += outputTokens
+          sessionTokens += inputTokens + outputTokens
           if (model) {
             const row = totals.models.get(model) ?? { sessions: 0, tokens: 0 }
-            row.tokens += (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)
+            row.tokens += inputTokens + outputTokens
             totals.models.set(model, row)
           }
         }
@@ -202,6 +222,11 @@ export async function collectUsageTotals(files: readonly string[], sinceMs: numb
     if (touchedThisSession) {
       totals.sessions += 1
       for (const model of sessionModels) { const row = totals.models.get(model) ?? { sessions: 0, tokens: 0 }; row.sessions += 1; totals.models.set(model, row) }
+      const sourceRow = totals.sources.get(sessionSource) ?? { sessions: 0, messages: 0, tokens: 0 }
+      sourceRow.sessions += 1
+      sourceRow.messages += sessionMessages
+      sourceRow.tokens += sessionTokens
+      totals.sources.set(sessionSource, sourceRow)
     }
   }
   return totals
