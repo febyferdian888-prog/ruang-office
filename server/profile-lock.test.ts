@@ -129,7 +129,7 @@ describe('private data of locked agents', () => {
     const jobs = redactCalendar(calendar, privacy).jobs.data
     expect(jobs.map((job) => job.name)).toEqual([PRIVATE_JOB, 'Morning brief'])
     expect(jobs[0].schedule).toBe('0 8 * * *')
-    const memory: MemorySnapshot = { agents: [{ profile: 'coder', label: 'coder', path: '~/.hermes/profiles/coder', kind: 'hermes', available: true, soul: { name: 'SOUL.md', path: 'SOUL.md', content: 'secret soul' } as never, contextFiles: [] }], fetchedAt: '' }
+    const memory: MemorySnapshot = { agents: [{ profile: 'coder', label: 'coder', path: '~/work/coder', kind: 'claude-code', available: true, soul: { name: 'SOUL.md', path: 'SOUL.md', content: 'secret soul' } as never, contextFiles: [] }], fetchedAt: '' }
     const locked = redactMemory(memory, privacy).agents[0]
     expect(locked).toMatchObject({ locked: true, available: false })
     expect(JSON.stringify(locked)).not.toContain('secret soul')

@@ -3,11 +3,13 @@ import { access, open, readdir, realpath, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
 import path from 'node:path'
 import { redactLogLine } from './mission-control.js'
+import { listAgents } from './claude-code.js'
 
-// Read-only browser over each agent's own folder: ~/.hermes/profiles/<name> for Hermes
-// profiles (`default` falls back to ~/.hermes when it has no profiles/default folder) and
-// ~/.opencode for OpenCode. Every request is confined to that folder (after
-// resolving symlinks), secret-bearing files are listed but never read, and text content is
+// Read-only browser over each agent's own folder: for a Claude Code agent (a project folder,
+// see claude-code.ts) this is the real project directory it works in (read from a session's own
+// `cwd`, falling back to its ~/.claude/projects/<slug> transcript folder if that cwd can no
+// longer be resolved), and ~/.opencode for OpenCode. Every request is confined to that folder
+// (after resolving symlinks), secret-bearing files are listed but never read, and text content is
 // passed through the same secret redaction as logs.
 
 const PREVIEW_LIMIT = 256 * 1024
@@ -222,21 +224,25 @@ async function firstDirectory(candidates: string[]): Promise<{ directory: string
 }
 
 /**
- * Resolves every agent to its own folder:
- * - Hermes profile <name> → <root>/profiles/<name>; `default` → <root>/profiles/default, or the
- *   Hermes root itself when that folder does not exist (stock Hermes layout);
+ * Resolves every agent to its own folder. Agents here are Claude Code project folders (see
+ * claude-code.ts): agent id `<slug>` → `~/.claude/projects/<slug>`, which holds that project's
+ * own session transcripts (and a `memory` folder when one exists) — its own state, not the
+ * client codebase it works on.
  * - OpenCode → ~/.opencode, then ~/.config/opencode (RUANG_OPENCODE_DIR, or the older MISSION_CONTROL_OPENCODE_DIR, overrides).
  * A non-default agent that resolves to the Hermes root, or to another agent's folder, is not
  * opened: it would show files that are not its own.
  */
 export async function resolveAgentFolders(profiles: string[], env: NodeJS.ProcessEnv = process.env, home = homedir()): Promise<AgentFolder[]> {
   const root = hermesRoot(env, home)
-  // Every Hermes profile this machine reports; `default` always exists in Hermes, so it is the
-  // fallback when the profile list cannot be read.
-  const listed = profiles.filter((name) => name !== 'opencode' && PROFILE_NAME.test(name))
-  const names = [...new Set(listed.length ? listed : ['default'])]
+  const projectsRoot = path.join(home, '.claude', 'projects')
+  // Every Claude Code project folder reported as an agent (see claude-code.ts's PROJECTS_DIR).
+  const names = [...new Set(profiles.filter((name) => name !== 'opencode' && PROFILE_NAME.test(name)))]
+  const known = await listAgents(Date.now(), projectsRoot).catch(() => [])
+  const cwdBySlug = new Map(known.map((agent) => [agent.slug, agent.cwd]))
   const specs = [
-    ...names.map((profile) => ({ profile, candidates: profile === 'default' ? [path.join(root, 'profiles', 'default'), root] : [path.join(root, 'profiles', profile)] })),
+    // The real project folder first (where CLAUDE.md and the actual files live); the transcript
+    // folder is the fallback for a project whose cwd can no longer be resolved on this machine.
+    ...names.map((profile) => ({ profile, candidates: [cwdBySlug.get(profile), path.join(projectsRoot, profile)].filter((candidate): candidate is string => !!candidate) })),
     { profile: 'opencode', candidates: (env.RUANG_OPENCODE_DIR ?? env.MISSION_CONTROL_OPENCODE_DIR) ? [path.resolve((env.RUANG_OPENCODE_DIR ?? env.MISSION_CONTROL_OPENCODE_DIR)!)] : [path.join(home, '.opencode'), path.join(home, '.config', 'opencode')] },
   ]
   const realRoot = await realpath(root).catch(() => root)

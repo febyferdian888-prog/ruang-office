@@ -1,19 +1,18 @@
 import { FolderError, readFolderFile, type AgentFolder } from './folders.js'
 
-// Memory & knowledge view of each agent, following Hermes's documented layout
-// (user-guide/features/memory.md, context-files.md, personality.md):
-// - SOUL.md in the profile folder is the agent identity (system prompt slot #1);
-// - memories/MEMORY.md (agent notes) and memories/USER.md (user profile) hold bounded,
-//   curated entries separated by "\n§\n", with character limits from config.yaml `memory.*`;
-// - AGENTS.md / AGENTS.override.md / HERMES.md / .hermes.md / CLAUDE.md / .cursorrules are
-//   context files when present.
+// Memory & knowledge view of each agent.
+//
+// A Claude Code agent (a project folder, see claude-code.ts) has no Hermes-style SOUL.md or
+// memories/MEMORY.md + memories/USER.md stores; its persistent instructions live in CLAUDE.md
+// files read at the start of every session (project CLAUDE.md, plus a project-local override),
+// so that is what this page shows as its context files instead.
 // Every read goes through readFolderFile, so it stays inside the agent's folder, never opens
 // credential files and is secret-redacted.
 
 export const ENTRY_DELIMITER = '\n§\n'
 export const DEFAULT_MEMORY_LIMIT = 2200
 export const DEFAULT_USER_LIMIT = 1375
-const CONTEXT_FILES = ['HERMES.md', '.hermes.md', 'AGENTS.override.md', 'AGENTS.md', 'CLAUDE.md', '.cursorrules']
+const CLAUDE_CODE_CONTEXT_FILES = ['CLAUDE.md', 'CLAUDE.local.md', '.clauderules']
 const OPENCODE_CONTEXT_FILES = ['AGENTS.md', 'CLAUDE.md']
 
 export interface MemoryDocument {
@@ -47,7 +46,7 @@ export interface AgentMemory {
   profile: string
   label: string
   path: string
-  kind: 'hermes' | 'opencode'
+  kind: 'claude-code' | 'opencode'
   available: boolean
   reason?: string
   soul?: MemoryDocument
@@ -75,13 +74,6 @@ async function readDocument(folder: AgentFolder, relative: string): Promise<Memo
 
 export function parseEntries(content: string): string[] {
   return content.replace(/\r\n/g, '\n').split(ENTRY_DELIMITER).map((entry) => entry.trim()).filter(Boolean)
-}
-
-function toStore(document: MemoryDocument, limit: number): MemoryStore {
-  const entries = document.content ? parseEntries(document.content) : []
-  // Hermes measures usage as the length of the entries joined by the delimiter.
-  const used = entries.join(ENTRY_DELIMITER).length
-  return { ...document, entries, limit, used, percent: limit > 0 ? Math.round((used / limit) * 100) : 0 }
 }
 
 /** Reads the `memory:` block of config.yaml (flat keys only; enough for the documented settings). */
@@ -119,35 +111,17 @@ export function parseMemorySettings(configYaml: string | undefined): MemorySetti
 
 export async function collectAgentMemory(folder: AgentFolder): Promise<AgentMemory> {
   const base = { profile: folder.profile, label: folder.label, path: folder.path }
-  if (!folder.available) return { ...base, kind: folder.profile === 'opencode' ? 'opencode' : 'hermes', available: false, reason: folder.reason, contextFiles: [] }
-  if (folder.profile === 'opencode') {
-    const contextFiles = (await Promise.all(OPENCODE_CONTEXT_FILES.map((name) => readDocument(folder, name)))).filter((document) => document.exists)
-    return { ...base, kind: 'opencode', available: true, contextFiles }
-  }
-  const [soul, memoryFile, userFile, config, ...context] = await Promise.all([
-    readDocument(folder, 'SOUL.md'),
-    readDocument(folder, 'memories/MEMORY.md'),
-    readDocument(folder, 'memories/USER.md'),
-    readDocument(folder, 'config.yaml'),
-    ...CONTEXT_FILES.map((name) => readDocument(folder, name)),
-  ])
-  const settings = parseMemorySettings(config.content)
-  return {
-    ...base,
-    kind: 'hermes',
-    available: true,
-    soul,
-    memory: toStore(memoryFile, settings.memoryLimit),
-    user: toStore(userFile, settings.userLimit),
-    contextFiles: context.filter((document) => document.exists),
-    settings,
-  }
+  const kind = folder.profile === 'opencode' ? 'opencode' as const : 'claude-code' as const
+  if (!folder.available) return { ...base, kind, available: false, reason: folder.reason, contextFiles: [] }
+  const files = folder.profile === 'opencode' ? OPENCODE_CONTEXT_FILES : CLAUDE_CODE_CONTEXT_FILES
+  const contextFiles = (await Promise.all(files.map((name) => readDocument(folder, name)))).filter((document) => document.exists)
+  return { ...base, kind, available: true, contextFiles }
 }
 
 export async function collectMemory(folders: AgentFolder[]): Promise<MemorySnapshot> {
   // One unreadable agent must not take the whole page down.
   const agents = await Promise.all(folders.map((folder) => collectAgentMemory(folder).catch((error: unknown): AgentMemory => ({
-    profile: folder.profile, label: folder.label, path: folder.path, kind: folder.profile === 'opencode' ? 'opencode' : 'hermes',
+    profile: folder.profile, label: folder.label, path: folder.path, kind: folder.profile === 'opencode' ? 'opencode' : 'claude-code',
     available: false, reason: error instanceof Error ? error.message : 'Could not read this agent.', contextFiles: [],
   }))))
   return { agents, fetchedAt: new Date().toISOString() }

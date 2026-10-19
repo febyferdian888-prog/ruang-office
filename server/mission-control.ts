@@ -1,5 +1,9 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
+import { claudeCodeRun } from './claude-code-run.js'
+import { CommandError } from './command-error.js'
+
+export { CommandError } from './command-error.js'
 
 const execFile = promisify(execFileCallback)
 const CACHE_MS = 10_000
@@ -115,11 +119,6 @@ export interface LogsSnapshot { files: LogFile[]; fetchedAt: string }
 
 type Run = (file: string, args: string[], options?: RunOptions) => Promise<string>
 interface RunOptions { /** stdout of a non-zero exit that is an expected empty state, not a failure. */ benign?: RegExp }
-
-/** Error thrown by the command runner. Carries stdout so a caller can recognise a benign non-zero exit. */
-export class CommandError extends Error {
-  constructor(message: string, readonly code: 'COMMAND_FAILED' | 'TIMEOUT', readonly stdout = '') { super(message) }
-}
 
 // ---------------------------------------------------------------------------
 // Shared text helpers
@@ -502,7 +501,7 @@ async function read<T>(run: Run, file: string, args: string[], parse: (output: s
 /** Profile names passed to `hermes -p`: plain names only, never anything that looks like an option. */
 export const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
 
-export async function collectSnapshot(run: Run = systemRun): Promise<RuntimeSnapshot> {
+export async function collectSnapshot(run: Run = claudeCodeRun): Promise<RuntimeSnapshot> {
   const [profiles, openCode] = await Promise.all([
     read(run, 'hermes', ['profile', 'list'], parseProfiles, []),
     read(run, 'opencode', ['--version'], (value) => value.trim().split('\n').pop()?.trim() || 'Unknown', 'Unknown'),
@@ -532,7 +531,7 @@ const KANBAN_CONCURRENCY = 4
  * `hermes kanban list` only shows the current one, so each board with tasks is read with
  * `--board`. Hermes versions without boards fall back to the plain list.
  */
-export async function collectTaskBoard(run: Run = systemRun): Promise<TaskBoardSnapshot> {
+export async function collectTaskBoard(run: Run = claudeCodeRun): Promise<TaskBoardSnapshot> {
   const fetchedAt = new Date().toISOString()
   const boards = await read(run, 'hermes', ['kanban', 'boards', 'list', '--json'], parseBoards, [])
   if (boards.availability !== 'available' || boards.data.length === 0) return { tasks: await read(run, 'hermes', ['kanban', 'list', '--json'], parseTasks, []), fetchedAt }
@@ -550,7 +549,7 @@ export async function collectTaskBoard(run: Run = systemRun): Promise<TaskBoardS
  * `hermes profile list` is read with `hermes -p <profile> cron list --all` and its jobs are
  * tagged with the profile. If the profile list cannot be read, the active profile is read as before.
  */
-export async function collectCalendar(run: Run = systemRun): Promise<CalendarSnapshot> {
+export async function collectCalendar(run: Run = claudeCodeRun): Promise<CalendarSnapshot> {
   const fetchedAt = new Date().toISOString()
   const profiles = await read(run, 'hermes', ['profile', 'list'], parseProfiles, [])
   const names = profiles.availability === 'available' ? profiles.data.map((profile) => profile.name).filter((name) => PROFILE_NAME.test(name)) : []
@@ -562,17 +561,17 @@ export async function collectCalendar(run: Run = systemRun): Promise<CalendarSna
   return { jobs: { availability: 'available', data: jobs }, ...(failedProfiles.length ? { failedProfiles } : {}), fetchedAt }
 }
 
-export async function collectActivity(run: Run = systemRun): Promise<ActivitySnapshot> {
+export async function collectActivity(run: Run = claudeCodeRun): Promise<ActivitySnapshot> {
   const sessions = await read(run, 'hermes', ['sessions', 'list', '--limit', '20'], parseSessions, [])
   return { sessions, fetchedAt: new Date().toISOString() }
 }
 
-export async function collectKnowledge(run: Run = systemRun): Promise<KnowledgeSnapshot> {
+export async function collectKnowledge(run: Run = claudeCodeRun): Promise<KnowledgeSnapshot> {
   const skills = await read(run, 'hermes', ['skills', 'list', '--enabled-only'], parseSkills, [])
   return { skills, fetchedAt: new Date().toISOString() }
 }
 
-export async function collectChannels(run: Run = systemRun): Promise<ChannelSnapshot> {
+export async function collectChannels(run: Run = claudeCodeRun): Promise<ChannelSnapshot> {
   const channelData = await read(run, 'hermes', ['status', '--all'], parseChannelStatus, { channels: [] as Channel[] })
   return {
     channels: { availability: channelData.availability, data: channelData.data.channels, ...(channelData.error && { error: channelData.error }) },
@@ -583,7 +582,7 @@ export async function collectChannels(run: Run = systemRun): Promise<ChannelSnap
 
 export const INSIGHT_DAYS = 7
 
-export async function collectInsights(run: Run = systemRun): Promise<Source<UsageInsights | null>> {
+export async function collectInsights(run: Run = claudeCodeRun): Promise<Source<UsageInsights | null>> {
   return read<UsageInsights | null>(run, 'hermes', ['insights', '--days', String(INSIGHT_DAYS)], (output) => parseInsights(output, INSIGHT_DAYS), null)
 }
 
@@ -604,7 +603,7 @@ function mergeRows<K extends 'model' | 'source'>(key: K, rows: ({ [P in K]: stri
  * Token usage of every agent. Hermes keeps sessions per profile, so `hermes insights` only
  * covers the active one; each profile is read with `-p` (at most four at a time) and summed.
  */
-export async function collectUsage(days: number, profiles: readonly string[], run: Run = systemRun): Promise<UsageSnapshot> {
+export async function collectUsage(days: number, profiles: readonly string[], run: Run = claudeCodeRun): Promise<UsageSnapshot> {
   const names = profiles.filter((name) => PROFILE_NAME.test(name))
   const agents = await mapLimit(names.length > 0 ? names : ['default'], USAGE_CONCURRENCY, async (agent): Promise<AgentUsage> => {
     const result = await read<UsageInsights | null>(run, 'hermes', [...(names.length > 0 ? ['-p', agent] : []), 'insights', '--days', String(days)], (output) => parseInsights(output, days), null)
@@ -632,7 +631,7 @@ export const LOG_FILES = [
 
 const LOG_MISSING = /Log file not found/i
 
-export async function collectLogs(run: Run = systemRun): Promise<LogsSnapshot> {
+export async function collectLogs(run: Run = claudeCodeRun): Promise<LogsSnapshot> {
   const files = await Promise.all(LOG_FILES.map(async ({ name, label }): Promise<LogFile> => {
     try {
       return { name, label, source: { availability: 'available', data: parseLogLines(await run('hermes', ['logs', name, '-n', String(LOG_TAIL_LINES)], { benign: LOG_MISSING })) } }
@@ -803,7 +802,7 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, task: (item: T
 }
 
 /** Live activity of every given Hermes profile (see `hermes profile list`). */
-export async function collectAgentActivity(profiles: readonly string[], run: Run = systemRun): Promise<AgentActivitySnapshot> {
+export async function collectAgentActivity(profiles: readonly string[], run: Run = claudeCodeRun): Promise<AgentActivitySnapshot> {
   const agents = await mapLimit(profiles.filter((profile) => PROFILE_NAME.test(profile)), ACTIVITY_CONCURRENCY, async (profile): Promise<AgentActivity> => {
     const [logs, sessions] = await Promise.all([
       run('hermes', ['-p', profile, 'logs', 'agent', '-n', '80', '--since', ACTIVITY_WINDOW], { benign: LOG_MISSING }).then((output) => ({ ok: true as const, output }), (error: unknown) => (error instanceof CommandError && LOG_MISSING.test(error.stdout) ? { ok: true as const, output: '' } : { ok: false as const, output: '' })),

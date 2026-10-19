@@ -18,37 +18,42 @@ describe('memory settings', () => {
   })
 })
 
-describe('agent memory', () => {
+describe('agent memory (Claude Code projects)', () => {
   let home: string
   const write = (file: string, content: string) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content) }
+  const session = (slug: string, id: string, cwd: string) => write(
+    path.join(home, '.claude', 'projects', slug, `${id}.jsonl`),
+    `${JSON.stringify({ type: 'user', cwd, timestamp: new Date().toISOString(), message: { role: 'user', content: 'hi' } })}\n`,
+  )
   beforeAll(() => {
     home = mkdtempSync(path.join(tmpdir(), 'mc-memory-'))
-    const lead = path.join(home, '.hermes', 'profiles', 'default')
-    write(path.join(lead, 'SOUL.md'), '# Lead\nYou coordinate the crew.\n')
-    write(path.join(lead, 'memories', 'MEMORY.md'), 'Server runs Ubuntu 22.04\n§\nDeploy key: api_key=sk-live-abcdefghijklmnop\n')
-    write(path.join(lead, 'memories', 'USER.md'), 'Prefers Bahasa Indonesia\n')
-    write(path.join(lead, 'config.yaml'), 'memory:\n  memory_char_limit: 100\n')
-    write(path.join(lead, 'AGENTS.md'), '# Conventions\n')
-    write(path.join(lead, '.env'), 'SECRET=1\n')
-    write(path.join(home, '.hermes', 'profiles', 'coder', 'SOUL.md'), 'Engineer\n')
-    write(path.join(home, '.opencode', 'AGENTS.md'), '# OpenCode rules\n')
+    const leadProject = path.join(home, 'work', 'lead')
+    session('lead-slug', '11111111-1111-1111-1111-111111111111', leadProject)
+    write(path.join(leadProject, 'CLAUDE.md'), '# Lead\nDeploy key: api_key=sk-live-abcdefghijklmnop\n')
+    write(path.join(leadProject, '.env'), 'SECRET=1\n')
+    const engineerProject = path.join(home, 'work', 'engineer')
+    mkdirSync(engineerProject, { recursive: true })
+    session('engineer-slug', '22222222-2222-2222-2222-222222222222', engineerProject)
+    // No CLAUDE.md for the engineer project: it is a known agent with no context files.
+    // `research-slug` is deliberately never listed as a known agent, so its folder cannot resolve.
   })
   afterAll(() => rmSync(home, { recursive: true, force: true }))
 
-  it('collects identity, memory stores with usage, context files and settings per agent', async () => {
-    const snapshot = await collectMemory(await resolveAgentFolders(['default', 'coder', 'research'], {}, home))
-    const [lead, engineer, research, openCode] = snapshot.agents
-    expect(lead).toMatchObject({ profile: 'default', kind: 'hermes', available: true, soul: { exists: true, content: '# Lead\nYou coordinate the crew.\n' } })
-    expect(lead.memory).toMatchObject({ exists: true, limit: 100, entries: ['Server runs Ubuntu 22.04', 'Deploy key: api_key=[redacted]'] })
-    expect(lead.memory!.used).toBe(lead.memory!.entries.join('\n§\n').length)
-    expect(lead.memory!.percent).toBeGreaterThan(50)
-    expect(lead.user).toMatchObject({ entries: ['Prefers Bahasa Indonesia'], limit: 1375 })
-    expect(lead.contextFiles.map((file) => file.name)).toEqual(['AGENTS.md'])
-    expect(lead.settings).toMatchObject({ memoryLimit: 100, source: 'config.yaml' })
+  it('collects CLAUDE.md context files per agent from its real project folder, redacted', async () => {
+    const snapshot = await collectMemory(await resolveAgentFolders(['lead-slug', 'engineer-slug', 'research-slug'], {}, home))
+    const [lead, engineer, research] = snapshot.agents
+    expect(lead).toMatchObject({ profile: 'lead-slug', kind: 'claude-code', available: true })
+    expect(lead.contextFiles).toMatchObject([{ name: 'CLAUDE.md', content: '# Lead\nDeploy key: api_key=[redacted]\n' }])
     expect(JSON.stringify(snapshot)).not.toContain('sk-live')
     expect(JSON.stringify(snapshot)).not.toContain('SECRET=1')
-    expect(engineer).toMatchObject({ available: true, soul: { exists: true }, memory: { exists: false, entries: [], used: 0 }, settings: { source: 'defaults' } })
+    expect(engineer).toMatchObject({ kind: 'claude-code', available: true, contextFiles: [] })
     expect(research).toMatchObject({ available: false, reason: 'Folder not found on this machine' })
+  })
+
+  it('reads OpenCode global context unchanged', async () => {
+    write(path.join(home, '.opencode', 'AGENTS.md'), '# OpenCode rules\n')
+    const snapshot = await collectMemory(await resolveAgentFolders([], {}, home))
+    const openCode = snapshot.agents.find((agent) => agent.profile === 'opencode')
     expect(openCode).toMatchObject({ kind: 'opencode', contextFiles: [{ name: 'AGENTS.md', content: '# OpenCode rules\n' }] })
   })
 })
